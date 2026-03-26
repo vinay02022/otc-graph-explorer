@@ -39,6 +39,12 @@ data/otc.db
 data/otc.db-wal
 data/otc.db-shm
 
+# project reference files
+/ProjectInfo/
+
+# claude code
+/.claude/
+
 # vercel
 .vercel
 
