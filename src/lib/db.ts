@@ -50,14 +50,16 @@ export function getDb(): Database.Database {
   if (db) return db;
 
   const fs = require('fs');
+
+  // First try to find pre-built DB
   let dbPath = getDbPath();
+  let dbExists = fs.existsSync(dbPath);
 
-  // If DB doesn't exist at any candidate path, try building in /tmp for serverless
-  if (!fs.existsSync(dbPath)) {
+  // On Vercel serverless, always build in /tmp if no pre-built DB found
+  if (!dbExists) {
     dbPath = '/tmp/otc.db';
+    dbExists = fs.existsSync(dbPath);
   }
-
-  const dbExists = fs.existsSync(dbPath);
 
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
@@ -65,7 +67,11 @@ export function getDb(): Database.Database {
 
   if (!dbExists) {
     const dataDir = getDataDir();
+    console.log('[DB] Building database at:', dbPath, 'from data dir:', dataDir);
     initializeDatabaseWithDir(db, dataDir);
+    console.log('[DB] Database built successfully');
+  } else {
+    console.log('[DB] Using existing database at:', dbPath);
   }
 
   return db;
