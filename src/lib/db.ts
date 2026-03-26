@@ -4,8 +4,33 @@ import { loadAllData, flattenRecord } from './ingest';
 
 let db: Database.Database | null = null;
 
-const DB_PATH = path.join(process.cwd(), 'data', 'otc.db');
-const DATA_DIR = path.join(process.cwd(), 'data');
+// Try multiple paths for Vercel compatibility
+function getDbPath(): string {
+  const fs = require('fs');
+  const candidates = [
+    path.join(process.cwd(), 'data', 'otc.db'),
+    path.join(__dirname, '..', '..', '..', 'data', 'otc.db'),
+    path.join(__dirname, '..', '..', 'data', 'otc.db'),
+    '/tmp/otc.db',
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return candidates[0]; // default, will trigger DB creation
+}
+
+function getDataDir(): string {
+  const fs = require('fs');
+  const candidates = [
+    path.join(process.cwd(), 'data'),
+    path.join(__dirname, '..', '..', '..', 'data'),
+    path.join(__dirname, '..', '..', 'data'),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return candidates[0];
+}
 
 // Sanitize column names for SQL
 function sanitizeCol(col: string): string {
@@ -25,21 +50,29 @@ export function getDb(): Database.Database {
   if (db) return db;
 
   const fs = require('fs');
-  const dbExists = fs.existsSync(DB_PATH);
+  let dbPath = getDbPath();
 
-  db = new Database(DB_PATH);
+  // If DB doesn't exist at any candidate path, try building in /tmp for serverless
+  if (!fs.existsSync(dbPath)) {
+    dbPath = '/tmp/otc.db';
+  }
+
+  const dbExists = fs.existsSync(dbPath);
+
+  db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = OFF');
 
   if (!dbExists) {
-    initializeDatabase(db);
+    const dataDir = getDataDir();
+    initializeDatabaseWithDir(db, dataDir);
   }
 
   return db;
 }
 
-function initializeDatabase(database: Database.Database) {
-  const data = loadAllData(DATA_DIR);
+function initializeDatabaseWithDir(database: Database.Database, dataDir: string) {
+  const data = loadAllData(dataDir);
 
   for (const [entityName, records] of Object.entries(data)) {
     if (records.length === 0) continue;

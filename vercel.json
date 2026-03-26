@@ -1,0 +1,10 @@
+{
+  "buildCommand": "node scripts/prebuild.js && next build",
+  "outputDirectory": ".next",
+  "framework": "nextjs",
+  "functions": {
+    "src/app/api/**/*.ts": {
+      "includeFiles": "data/**"
+    }
+  }
+}
