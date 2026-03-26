@@ -32,6 +32,12 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.local.example
+
+# SQLite database (generated at build time)
+data/otc.db
+data/otc.db-wal
+data/otc.db-shm
 
 # vercel
 .vercel
