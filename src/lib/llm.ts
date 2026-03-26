@@ -23,7 +23,7 @@ export async function processChat(
 
   const model = genAI.getGenerativeModel({
     model: 'gemini-2.0-flash',
-    systemInstruction: getSystemPrompt(),
+    systemInstruction: await getSystemPrompt(),
   });
 
   // Layer 2: LLM generates SQL (with guardrails in system prompt)
@@ -50,7 +50,7 @@ export async function processChat(
   const sql = sqlMatch[1].trim();
 
   // Layer 3: Post-LLM SQL validation
-  const sqlCheck = validateSQL(sql);
+  const sqlCheck = await validateSQL(sql);
   if (!sqlCheck.valid) {
     return {
       answer: `I generated a query but it was blocked by safety checks: ${sqlCheck.reason}. Please try rephrasing your question.`,
@@ -59,7 +59,7 @@ export async function processChat(
 
   // Execute the SQL
   try {
-    const { rows } = executeQuery(sql);
+    const { rows } = await executeQuery(sql);
     const highlightedNodes = extractEntityIds(rows);
 
     // SECOND PASS: Send results back to LLM for a data-backed natural language summary
@@ -105,10 +105,10 @@ Now provide a clear, concise natural language answer summarizing these results. 
 
       if (fixSqlMatch) {
         const fixedSql = fixSqlMatch[1].trim();
-        const fixSqlCheck = validateSQL(fixedSql);
+        const fixSqlCheck = await validateSQL(fixedSql);
         if (fixSqlCheck.valid) {
           try {
-            const { rows } = executeQuery(fixedSql);
+            const { rows } = await executeQuery(fixedSql);
             const highlightedNodes = extractEntityIds(rows);
 
             if (rows.length > 0) {

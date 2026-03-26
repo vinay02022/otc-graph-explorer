@@ -1,7 +1,7 @@
 import { getTableSchema } from './db';
 
-export function getSystemPrompt(): string {
-  const schema = getTableSchema();
+export async function getSystemPrompt(): Promise<string> {
+  const schema = await getTableSchema();
 
   return `You are an Order to Cash (OTC) data analyst assistant. You help users query and analyze an SAP-style Order to Cash dataset stored in a SQLite database.
 

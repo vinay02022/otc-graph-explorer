@@ -35,7 +35,7 @@ export function validateInput(message: string): { valid: boolean; reason?: strin
   return { valid: true };
 }
 
-export function validateSQL(sql: string): { valid: boolean; reason?: string } {
+export async function validateSQL(sql: string): Promise<{ valid: boolean; reason?: string }> {
   const normalized = sql.trim().toUpperCase();
 
   // Only allow SELECT statements
@@ -64,7 +64,7 @@ export function validateSQL(sql: string): { valid: boolean; reason?: string } {
 
   // Validate table references against known tables
   try {
-    const tableNames = getTableNames();
+    const tableNames = await getTableNames();
     const tablePattern = /\bFROM\b\s+"?(\w+)"?|\bJOIN\b\s+"?(\w+)"?/gi;
     let match;
     while ((match = tablePattern.exec(sql)) !== null) {

@@ -1,26 +1,12 @@
-import Database from 'better-sqlite3';
+import initSqlJs, { type Database as SqlJsDatabase, type QueryExecResult } from 'sql.js';
 import path from 'path';
+import fs from 'fs';
 import { loadAllData, flattenRecord } from './ingest';
 
-let db: Database.Database | null = null;
-
-// Try multiple paths for Vercel compatibility
-function getDbPath(): string {
-  const fs = require('fs');
-  const candidates = [
-    path.join(process.cwd(), 'data', 'otc.db'),
-    path.join(__dirname, '..', '..', '..', 'data', 'otc.db'),
-    path.join(__dirname, '..', '..', 'data', 'otc.db'),
-    '/tmp/otc.db',
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-  return candidates[0]; // default, will trigger DB creation
-}
+let db: SqlJsDatabase | null = null;
+let dbInitPromise: Promise<SqlJsDatabase> | null = null;
 
 function getDataDir(): string {
-  const fs = require('fs');
   const candidates = [
     path.join(process.cwd(), 'data'),
     path.join(__dirname, '..', '..', '..', 'data'),
@@ -37,56 +23,72 @@ function sanitizeCol(col: string): string {
   return col.replace(/[^a-zA-Z0-9_]/g, '_');
 }
 
-function toSnakeCase(str: string): string {
-  return str.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '');
-}
-
-// Convert camelCase entity dir name to table name
-function toTableName(dirName: string): string {
-  return dirName; // already snake_case from directory names
-}
-
-export function getDb(): Database.Database {
+async function initDb(): Promise<SqlJsDatabase> {
   if (db) return db;
 
-  const fs = require('fs');
+  const SQL = await initSqlJs({
+    locateFile: (file: string) => {
+      // Try multiple locations for the WASM file
+      const candidates = [
+        path.join(process.cwd(), 'node_modules', 'sql.js', 'dist', file),
+        path.join(__dirname, '..', '..', '..', 'node_modules', 'sql.js', 'dist', file),
+      ];
+      for (const p of candidates) {
+        if (fs.existsSync(p)) return p;
+      }
+      return candidates[0];
+    }
+  });
 
-  // First try to find pre-built DB
-  let dbPath = getDbPath();
-  let dbExists = fs.existsSync(dbPath);
+  // Try to load pre-built DB file
+  const dbCandidates = [
+    path.join(process.cwd(), 'data', 'otc.db'),
+    path.join(__dirname, '..', '..', '..', 'data', 'otc.db'),
+    '/tmp/otc.db',
+  ];
 
-  // On Vercel serverless, always build in /tmp if no pre-built DB found
-  if (!dbExists) {
-    dbPath = '/tmp/otc.db';
-    dbExists = fs.existsSync(dbPath);
+  for (const dbPath of dbCandidates) {
+    if (fs.existsSync(dbPath)) {
+      try {
+        const buffer = fs.readFileSync(dbPath);
+        db = new SQL.Database(buffer);
+        console.log('[DB] Loaded pre-built database from:', dbPath);
+        return db;
+      } catch (e) {
+        console.log('[DB] Failed to load from', dbPath, ':', (e as Error).message);
+      }
+    }
   }
 
-  db = new Database(dbPath);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = OFF');
+  // Build database in memory from JSONL files
+  console.log('[DB] Building database in memory from JSONL files');
+  db = new SQL.Database();
+  const dataDir = getDataDir();
+  console.log('[DB] Data dir:', dataDir);
+  buildDatabase(db, dataDir);
 
-  if (!dbExists) {
-    const dataDir = getDataDir();
-    console.log('[DB] Building database at:', dbPath, 'from data dir:', dataDir);
-    initializeDatabaseWithDir(db, dataDir);
-    console.log('[DB] Database built successfully');
-  } else {
-    console.log('[DB] Using existing database at:', dbPath);
+  // Try to persist to /tmp for reuse
+  try {
+    const data = db.export();
+    fs.writeFileSync('/tmp/otc.db', Buffer.from(data));
+    console.log('[DB] Saved database to /tmp/otc.db');
+  } catch {
+    console.log('[DB] Could not save to /tmp (non-critical)');
   }
 
+  console.log('[DB] Database ready');
   return db;
 }
 
-function initializeDatabaseWithDir(database: Database.Database, dataDir: string) {
+function buildDatabase(database: SqlJsDatabase, dataDir: string) {
   const data = loadAllData(dataDir);
 
   for (const [entityName, records] of Object.entries(data)) {
     if (records.length === 0) continue;
 
-    const tableName = toTableName(entityName);
     const flatRecords = records.map(flattenRecord);
 
-    // Collect all unique columns across all records
+    // Collect all unique columns
     const allColumns = new Set<string>();
     for (const rec of flatRecords) {
       for (const key of Object.keys(rec)) {
@@ -97,25 +99,21 @@ function initializeDatabaseWithDir(database: Database.Database, dataDir: string)
 
     // Create table
     const colDefs = columns.map(c => `"${sanitizeCol(c)}" TEXT`).join(', ');
-    database.exec(`CREATE TABLE IF NOT EXISTS "${tableName}" (${colDefs})`);
+    database.run(`CREATE TABLE IF NOT EXISTS "${entityName}" (${colDefs})`);
 
     // Insert data
     const placeholders = columns.map(() => '?').join(', ');
     const colNames = columns.map(c => `"${sanitizeCol(c)}"`).join(', ');
-    const insert = database.prepare(
-      `INSERT INTO "${tableName}" (${colNames}) VALUES (${placeholders})`
-    );
+    const insertSql = `INSERT INTO "${entityName}" (${colNames}) VALUES (${placeholders})`;
 
-    const insertMany = database.transaction((recs: Record<string, string | null>[]) => {
-      for (const rec of recs) {
-        const values = columns.map(c => rec[c] ?? null);
-        insert.run(...values);
-      }
-    });
+    database.run('BEGIN TRANSACTION');
+    for (const rec of flatRecords) {
+      const values = columns.map(c => rec[c] ?? null);
+      database.run(insertSql, values);
+    }
+    database.run('COMMIT');
 
-    insertMany(flatRecords);
-
-    // Create indexes on common FK columns
+    // Create indexes
     const indexColumns = [
       'salesOrder', 'salesOrderItem', 'deliveryDocument', 'deliveryDocumentItem',
       'billingDocument', 'billingDocumentItem', 'material', 'product', 'plant',
@@ -127,57 +125,70 @@ function initializeDatabaseWithDir(database: Database.Database, dataDir: string)
     for (const col of indexColumns) {
       if (columns.includes(col)) {
         try {
-          database.exec(
-            `CREATE INDEX IF NOT EXISTS "idx_${tableName}_${sanitizeCol(col)}" ON "${tableName}" ("${sanitizeCol(col)}")`
+          database.run(
+            `CREATE INDEX IF NOT EXISTS "idx_${entityName}_${sanitizeCol(col)}" ON "${entityName}" ("${sanitizeCol(col)}")`
           );
-        } catch {
-          // skip if index creation fails
-        }
+        } catch { /* skip */ }
       }
     }
   }
 }
 
-export function executeQuery(sql: string): { columns: string[]; rows: Record<string, unknown>[] } {
-  const database = getDb();
+export async function getDb(): Promise<SqlJsDatabase> {
+  if (db) return db;
+  if (!dbInitPromise) {
+    dbInitPromise = initDb();
+  }
+  return dbInitPromise;
+}
+
+export async function executeQuery(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[] }> {
+  const database = await getDb();
   try {
-    const stmt = database.prepare(sql);
-    const rows = stmt.all() as Record<string, unknown>[];
-    const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
-    return { columns, rows: rows.slice(0, 100) }; // limit to 100 rows
+    const result = database.exec(sql);
+    if (result.length === 0) {
+      return { columns: [], rows: [] };
+    }
+    const { columns, values } = result[0];
+    const rows = values.slice(0, 100).map((row: unknown[]) => {
+      const obj: Record<string, unknown> = {};
+      columns.forEach((col: string, i: number) => { obj[col] = row[i]; });
+      return obj;
+    });
+    return { columns, rows };
   } catch (error) {
     throw new Error(`SQL execution error: ${(error as Error).message}`);
   }
 }
 
-export function getTableSchema(): string {
-  const database = getDb();
-  const tables = database
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    .all() as { name: string }[];
+export async function getTableSchema(): Promise<string> {
+  const database = await getDb();
+  const tablesResult = database.exec("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+  if (tablesResult.length === 0) return '';
 
+  const tableNames = tablesResult[0].values.map((r: unknown[]) => r[0] as string);
   const schemas: string[] = [];
-  for (const { name } of tables) {
-    const info = database
-      .prepare(`PRAGMA table_info("${name}")`)
-      .all() as { name: string; type: string }[];
-    const cols = info.map(c => `  ${c.name} ${c.type || 'TEXT'}`).join(',\n');
+
+  for (const name of tableNames) {
+    const info = database.exec(`PRAGMA table_info("${name}")`);
+    if (info.length === 0) continue;
+    const cols = info[0].values.map((r: unknown[]) => `  ${r[1]} ${r[2] || 'TEXT'}`).join(',\n');
     schemas.push(`CREATE TABLE ${name} (\n${cols}\n);`);
 
-    // Add sample data as comment
-    const sample = database.prepare(`SELECT * FROM "${name}" LIMIT 2`).all() as Record<string, unknown>[];
-    if (sample.length > 0) {
-      schemas.push(`-- Sample: ${JSON.stringify(sample[0])}`);
+    const sample = database.exec(`SELECT * FROM "${name}" LIMIT 1`);
+    if (sample.length > 0 && sample[0].values.length > 0) {
+      const obj: Record<string, unknown> = {};
+      sample[0].columns.forEach((col: string, i: number) => { obj[col] = sample[0].values[0][i]; });
+      schemas.push(`-- Sample: ${JSON.stringify(obj)}`);
     }
   }
 
   return schemas.join('\n\n');
 }
 
-export function getTableNames(): string[] {
-  const database = getDb();
-  const tables = database
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    .all() as { name: string }[];
-  return tables.map(t => t.name);
+export async function getTableNames(): Promise<string[]> {
+  const database = await getDb();
+  const result = database.exec("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+  if (result.length === 0) return [];
+  return result[0].values.map((r: unknown[]) => r[0] as string);
 }

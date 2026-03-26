@@ -51,3 +51,5 @@ data/otc.db-shm
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.vercel

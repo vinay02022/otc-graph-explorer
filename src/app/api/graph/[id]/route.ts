@@ -8,7 +8,7 @@ export async function GET(
   try {
     const { id } = await params;
     const nodeId = decodeURIComponent(id);
-    const graph = getGraph();
+    const graph = await getGraph();
 
     const node = graph.nodes.find(n => n.id === nodeId);
     if (!node) {
